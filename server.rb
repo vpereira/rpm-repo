@@ -7,50 +7,64 @@ set :bind, '0.0.0.0'
 set :port, 3000
 
 # Set up the upstream repository URL
-upstream_repo_url = 'http://download.opensuse.org/tumbleweed/repo/oss/'
+UPSTREAM_REPO_URL = 'http://download.opensuse.org/tumbleweed/repo/oss/'
 
 # Set up the local cache directory
-cache_dir = '/var/www/html/repo'
+CACHE_DIR = '/var/www/html/repo'
 
 # Ensure the cache directory exists
-Dir.mkdir(cache_dir) unless Dir.exist?(cache_dir)
+Dir.mkdir(CACHE_DIR) unless Dir.exist?(CACHE_DIR)
 
 # Set up the Nginx server URL
-nginx_url = 'http://localhost:80'
+NGINX_URL = 'http://localhost:80'
+
+helpers do
+  # Constructs the URL for the requested package in the upstream repository
+  def package_url(package, version)
+    "#{UPSTREAM_REPO_URL}/#{package}-#{version}.rpm"
+  end
+
+  # Constructs the local cache file path for the requested package
+  def cache_file(package, version)
+    File.join(CACHE_DIR, "#{package}-#{version}.rpm")
+  end
+
+  # Downloads the package from the upstream repository and caches it locally
+  def download_package(package, version)
+    package_uri = URI.parse(package_url(package, version))
+    response = Net::HTTP.get_response(package_uri)
+
+    raise "Package not found: #{package}-#{version}" unless response.code == '200'
+
+    # If the package was downloaded successfully, cache it locally
+    File.open(cache_file(package, version), 'wb') do |file|
+      file.write(response.body)
+    end
+  end
+
+  # Serve the package using Nginx
+  def serve_package(package, version)
+    redirect "#{NGINX_URL}/#{cache_file(package, version)}"
+  end
+end
 
 # Route for handling package installation requests
 get '/*' do
   # Extract the package name and version from the request URL
-  package = params[:splat].first
-  version = params[:splat].last
-
-  # Construct the URL for the requested package in the upstream repository
-  package_url = "#{upstream_repo_url}/#{package}-#{version}.rpm"
-
-  # Construct the local cache file path for the requested package
-  cache_file = File.join(cache_dir, "#{package}-#{version}.rpm")
+  package, version = params[:splat]
 
   # Check if the package is already in the local cache
-  if File.exist?(cache_file)
-    # If the package is in the cache, serve it using Nginx
-    redirect "#{nginx_url}/#{cache_file}"
+  if File.exist?(cache_file(package, version))
+    serve_package(package, version)
   else
     # If the package is not in the cache, download it from the upstream repository and cache it locally
-    uri = URI.parse(package_url)
-    response = Net::HTTP.get_response(uri)
-
-    if response.code == '200'
-      # If the package was downloaded successfully, cache it locally
-      File.open(cache_file, 'wb') do |file|
-        file.write(response.body)
-      end
-
-      # Serve the package using Nginx
-      redirect "#{nginx_url}/#{cache_file}"
-    else
+    begin
+      download_package(package, version)
+      serve_package(package, version)
+    rescue StandardError => e
       # If the package was not found in the upstream repository, return a 404 error
       status 404
-      body "Package not found: #{package}-#{version}"
+      body e.message
     end
   end
 end
